@@ -1,0 +1,62 @@
+{
+  "manifestVersion": 2,
+  "id": "orca-git-ide-view",
+  "name": "Git IDE View",
+  "version": "0.4.0",
+  "description": "IDE-style Git tool window for Orca's sidebar: changes tree with checkboxes, commit and push, side-by-side diff, conflict resolution, a Log with the branch graph, and a Shelf.",
+  "license": "MIT",
+  "engines": {
+    "orca": ">=1.4.248"
+  },
+  "execution": "trusted-worker",
+  "pluginApi": 1,
+  "main": "src/worker.ts",
+  "contributes": {
+    "panels": [
+      {
+        "id": "commit",
+        "title": "Commit",
+        "icon": "branch",
+        "entry": "panel/index.html"
+      }
+    ],
+    "commands": [
+      {
+        "id": "git.refresh",
+        "title": "Git: Refresh Changes",
+        "when": "workspace"
+      },
+      {
+        "id": "git.updateProject",
+        "title": "Git: Update Project",
+        "when": "workspace"
+      },
+      {
+        "id": "git.push",
+        "title": "Git: Push",
+        "when": "workspace"
+      },
+      {
+        "id": "git.fetch",
+        "title": "Git: Fetch",
+        "when": "workspace"
+      }
+    ],
+    "events": [
+      {
+        "on": "workspace.changed"
+      }
+    ]
+  },
+  "capabilities": [
+    {
+      "kind": "workspace:read"
+    },
+    {
+      "kind": "notifications:show"
+    },
+    {
+      "kind": "storage:own"
+    }
+  ]
+}

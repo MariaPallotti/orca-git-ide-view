@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Commit</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <div id="app">
+      <nav id="tabs" role="tablist">
+        <button role="tab" data-tab="commit" aria-selected="true">Commit</button>
+        <button role="tab" data-tab="shelf" aria-selected="false">Shelf</button>
+        <span class="spacer"></span>
+        <span id="branch" class="branch" title="Current branch"></span>
+      </nav>
+      <div id="banner" hidden></div>
+
+      <!-- Commit tool window -->
+      <section id="commit-view" class="view">
+        <div id="commit-top" class="commit-top">
+        <div id="op-bar" class="op-bar" hidden>
+          <div id="op-title" class="op-title"></div>
+          <div class="op-actions">
+            <button id="op-resolve" title="Open the first conflicted file in the merge view">Resolve…</button>
+            <button id="op-continue" class="primary">Continue</button>
+            <button id="op-abort">Abort</button>
+          </div>
+        </div>
+        <div class="toolbar" role="toolbar" aria-label="Changes">
+          <button class="tb" data-act="refresh" title="Refresh">⟳</button>
+          <button class="tb" data-act="rollback" title="Rollback… (Ctrl+Alt+Z)">↶</button>
+          <button class="tb" data-act="diff" title="Show Diff (Ctrl+D)">⇄</button>
+          <button class="tb" data-act="shelve" title="Shelve Changes…">⤓</button>
+          <span class="sep"></span>
+          <button class="tb" data-act="group" title="Group by Directory" aria-pressed="true">▤</button>
+          <button class="tb" data-act="expand" title="Expand All">⊞</button>
+          <button class="tb" data-act="collapse" title="Collapse All">⊟</button>
+        </div>
+        <div id="tree" class="tree" tabindex="0" role="tree" aria-label="Changes"></div>
+        <div id="commit-box">
+          <label class="check"><input type="checkbox" id="amend" /> Amend</label>
+          <textarea id="message" placeholder="Commit Message" spellcheck="true"></textarea>
+          <div class="commit-actions">
+            <button id="commit" class="primary" title="Commit (Ctrl+Enter)">Commit</button>
+            <button id="commit-push" title="Commit and Push (Ctrl+Alt+K)">Commit and Push…</button>
+            <span id="summary" class="muted"></span>
+          </div>
+        </div>
+        </div>
+
+        <!-- Git Log, docked at the bottom: branches on the left, history on the right -->
+        <div id="log-splitter" class="splitter row" role="separator" aria-orientation="horizontal" aria-label="Resize the Log" tabindex="0"></div>
+        <section id="log-pane" class="log-pane">
+          <div class="toolbar log-toolbar">
+            <button class="tb pane-toggle" data-act="log-toggle" title="Hide Log" aria-expanded="true"></button>
+            <span class="pane-title">Log</span>
+            <button class="tb" data-act="branches-toggle" title="Show Branches" aria-pressed="true">⑂</button>
+            <button id="log-branch" class="branch-select" aria-haspopup="listbox" aria-label="Branch"></button>
+            <input id="log-filter" type="search" placeholder="Filter commits" />
+            <button class="tb" data-act="log-fetch" title="Fetch">⇣</button>
+            <button class="tb" data-act="log-refresh" title="Refresh">⟳</button>
+          </div>
+          <div class="log-body">
+            <div id="branches-pane" class="branches-pane">
+              <div id="branches" class="tree branches" tabindex="0" role="tree" aria-label="Branches"></div>
+            </div>
+            <div id="branch-splitter" class="splitter col" role="separator" aria-orientation="vertical" aria-label="Resize the branches" tabindex="0"></div>
+            <div id="log" class="log"></div>
+          </div>
+        </section>
+      </section>
+
+      <!-- Shelf -->
+      <section id="shelf-view" class="view" hidden>
+        <div class="toolbar">
+          <button class="tb" data-act="shelf-refresh" title="Refresh">⟳</button>
+          <span class="muted shelf-hint">Shelved changes are kept as git stashes</span>
+        </div>
+        <div id="shelf" class="log"></div>
+      </section>
+
+      <!-- Diff viewer -->
+      <section id="diff-view" class="view" hidden>
+        <div class="toolbar diff-toolbar">
+          <button class="tb" data-act="back" title="Back (Esc)">←</button>
+          <button class="tb" data-act="prev-change" title="Previous Difference (Shift+F7)">↑</button>
+          <button class="tb" data-act="next-change" title="Next Difference (F7)">↓</button>
+          <button class="tb" data-act="prev-file" title="Previous File (Alt+←)">◀</button>
+          <button class="tb" data-act="next-file" title="Next File (Alt+→)">▶</button>
+          <span class="sep"></span>
+          <select id="diff-mode" title="Viewer">
+            <option value="split">Side-by-side</option>
+            <option value="unified">Unified</option>
+          </select>
+          <button class="tb" data-act="open" title="Jump to Source (F4)">↗</button>
+          <span id="diff-count" class="muted"></span>
+        </div>
+        <div id="diff-title" class="diff-title"></div>
+        <div id="diff" class="diff" tabindex="0"></div>
+      </section>
+
+      <!-- Merge view (conflict resolution) -->
+      <section id="merge-view" class="view" hidden>
+        <div class="toolbar diff-toolbar">
+          <button class="tb" data-act="m-back" title="Back (Esc)">←</button>
+          <button class="tb" data-act="m-prev" title="Previous Conflict (Shift+F7)">↑</button>
+          <button class="tb" data-act="m-next" title="Next Conflict (F7)">↓</button>
+          <span class="sep"></span>
+          <button data-act="m-all-yours" title="Accept Yours for every unresolved conflict">All Yours</button>
+          <button data-act="m-all-theirs" title="Accept Theirs for every unresolved conflict">All Theirs</button>
+          <span class="sep"></span>
+          <button class="primary" data-act="m-apply" title="Save the file; when no conflict is left it is marked as resolved">Apply</button>
+          <button class="tb" data-act="m-open" title="Jump to Source (F4)">↗</button>
+          <span id="merge-count" class="muted"></span>
+        </div>
+        <div id="merge-title" class="diff-title unified"></div>
+        <div id="merge" class="diff merge" tabindex="0"></div>
+      </section>
+
+      <div id="switching" class="switching" hidden role="status" aria-live="polite">
+        <div class="switching-card">
+          <div class="spinner" aria-hidden="true"></div>
+          <div id="switching-title" class="switching-title">Loading repository…</div>
+          <div class="muted">Reading changes, branches and history</div>
+        </div>
+      </div>
+      <div id="branch-popup" class="branch-popup" hidden></div>
+      <div id="menu" class="menu" hidden role="menu"></div>
+      <div id="dialog" class="dialog-backdrop" hidden></div>
+      <div id="progress" class="progress-stack" role="status" aria-live="polite"></div>
+      <div id="toast" role="status" aria-live="polite"></div>
+    </div>
+    <script type="module" src="app.js"></script>
+  </body>
+</html>
