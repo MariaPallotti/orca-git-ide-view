@@ -1000,6 +1000,10 @@ body.busy {
   height: 26px;
   gap: 8px;
   padding-right: 10px;
+  /* Hundreds of rows, each with its graph SVG: the browser lays out and paints only those near
+     the visible part of the Log. */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 26px;
 }
 .commit-row.line .subject {
   flex: 1;

@@ -6,6 +6,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { assert, mockHost, mountWorker, test } from 'orca/testing'
 import * as main from './worker.ts'
+import * as g from './git.ts'
 
 function makeRepo(): string {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'orca-git-ide-view-'))
@@ -551,5 +552,63 @@ test('workspaces with the same name and branch: their terminals tell a switch fr
     await worker?.deactivate()
     cleanup(a)
     cleanup(b)
+  }
+})
+
+test('diffs without a parent: a repository with no commit, and the root commit', async () => {
+  const empty = mkdtempSync(path.join(os.tmpdir(), 'orca-git-ide-view-'))
+  const dir = makeRepo()
+  let worker: Awaited<ReturnType<typeof mountWorker>> | undefined
+  try {
+    execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: empty, stdio: 'pipe' })
+    writeFileSync(path.join(empty, 'new.txt'), 'a\nb\n')
+    execFileSync('git', ['add', 'new.txt'], { cwd: empty, stdio: 'pipe' })
+    worker = await mountWorker(main, { host: hostFor(empty) })
+    type D = { left: string; right: string; hunks: { newLines: number }[]; canRevert: boolean }
+    const added = ok<D>(await worker.request('git.diff', { path: 'new.txt', mode: { kind: 'local' } }))
+    assert.equal(added.left, '')
+    assert.equal(added.right, 'a\nb\n')
+    assert.deepEqual(added.hunks.map((h) => h.newLines), [2])
+    assert.equal(added.canRevert, false)
+    await worker.deactivate()
+
+    worker = await mountWorker(main, { host: hostFor(dir) })
+    const rootRev = execFileSync('git', ['rev-list', '--max-parents=0', 'HEAD'], { cwd: dir }).toString().trim()
+    const files = ok<{ path: string; status: string }[]>(await worker.request('git.commitFiles', { rev: rootRev }))
+    assert.deepEqual(files.map((f) => `${f.status}:${f.path}`), ['added:a.txt', 'added:b.txt'])
+    const first = ok<D & { leftTitle: string }>(await worker.request('git.diff', { path: 'a.txt', mode: { kind: 'commit', rev: rootRev } }))
+    assert.equal(first.leftTitle, '(none)')
+    assert.equal(first.left, '')
+    assert.deepEqual(first.hunks.map((h) => h.newLines), [5])
+
+    // A second commit: its diff is against the parent, and the commit's hash comes from git's output.
+    writeFileSync(path.join(dir, 'b.txt'), 'bee\nsea\n')
+    const c = ok<{ hash: string }>(await worker.request('git.commit', { files: [{ path: 'b.txt', status: 'modified' }], message: 'more', amend: false, push: false }))
+    assert.equal(c.hash, execFileSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: dir }).toString().trim())
+    const second = ok<D & { leftTitle: string }>(await worker.request('git.diff', { path: 'b.txt', mode: { kind: 'commit', rev: c.hash } }))
+    assert.equal(second.left, 'bee\n')
+    assert.equal(second.right, 'bee\nsea\n')
+    assert.equal(second.leftTitle, rootRev.slice(0, 8))
+  } finally {
+    await worker?.deactivate()
+    cleanup(empty)
+    cleanup(dir)
+  }
+})
+
+test('"staged only" read from a status the watcher already has, or from git', async () => {
+  const dir = makeRepo()
+  try {
+    writeFileSync(path.join(dir, 'a.txt'), 'staged\n')
+    execFileSync('git', ['add', 'a.txt'], { cwd: dir, stdio: 'pipe' })
+    writeFileSync(path.join(dir, 'b.txt'), 'unstaged\n')
+    writeFileSync(path.join(dir, 'c d.txt'), 'untracked\n')
+    const status = execFileSync('git', ['status', '--porcelain=v2', '-z', '--untracked-files=all'], { cwd: dir }).toString()
+    for (const [file, want] of [['a.txt', true], ['b.txt', false], ['c d.txt', false]] as const) {
+      assert.equal(await g.onlyStaged(dir, file, status), want, `${file} from the status`)
+      assert.equal(await g.onlyStaged(dir, file), want, `${file} from git`)
+    }
+  } finally {
+    cleanup(dir)
   }
 })

@@ -926,7 +926,12 @@ $('log').addEventListener('contextmenu', (e) => {
     { label: 'Copy Subject', run: () => copy(c.subject) }
   ])
 })
-$('log-filter').addEventListener('input', renderLog)
+// Each keystroke would redraw the whole Log: wait until typing pauses.
+let logFilterTimer
+$('log-filter').addEventListener('input', () => {
+  clearTimeout(logFilterTimer)
+  logFilterTimer = setTimeout(renderLog, 120)
+})
 
 // ---- branches tree ---------------------------------------------------------
 

@@ -224,25 +224,50 @@ export async function diff(root: string, file: string, origPath: string | undefi
   let right: string | null
   let leftTitle: string
   let rightTitle: string
-  let diffArgs: string[]
   let canRevert = false
 
+  // Every git command below starts at once: on Windows each one costs a few hundred milliseconds
+  // just to start, so running them one after the other added up to about a second.
+  const paths = ['--', ...(origPath ? [origPath] : []), file]
+  const quiet = { allowFail: true, readOnly: true }
+  let patch: Promise<string>
+  let untracked = false
   if (mode.kind === 'local') {
-    const head = await hasHead(root)
-    left = head ? await blob(root, `HEAD:${leftPath}`) : null
-    right = await readDisk(root, file)
+    // A new repository has no HEAD: then the left side is empty and the diff is against the empty tree.
+    const diffHead = git(root, ['diff', '-U0', '--no-ext-diff', '-M', 'HEAD', ...paths], quiet)
+    const [l, r, tracked] = await Promise.all([
+      blob(root, `HEAD:${leftPath}`),
+      readDisk(root, file),
+      git(root, ['ls-files', '--error-unmatch', '--', file], quiet).then((x) => x.code === 0),
+      diffHead
+    ])
+    left = l
+    right = r
+    untracked = !tracked && left === null
+    patch = diffHead.then(async (d) =>
+      d.code === 0 || (await hasHead(root)) ? d.stdout : (await git(root, ['diff', '-U0', '--no-ext-diff', '-M', EMPTY_TREE, ...paths], quiet)).stdout
+    )
     leftTitle = 'HEAD'
     rightTitle = 'Your version'
-    diffArgs = ['diff', '-U0', '--no-ext-diff', '-M', head ? 'HEAD' : EMPTY_TREE, '--', ...(origPath ? [origPath] : []), file]
     canRevert = left !== null && right !== null
   } else {
-    const parentR = await git(root, ['rev-parse', '-q', '--verify', `${mode.rev}^`], { allowFail: true, readOnly: true })
+    // Against the first parent; a root commit has none and compares with the empty tree.
+    const rev = mode.rev
+    const diffParent = git(root, ['diff', '-U0', '--no-ext-diff', '-M', `${rev}^`, rev, ...paths], quiet)
+    const [parentR, l, r] = await Promise.all([
+      git(root, ['rev-parse', '-q', '--verify', `${rev}^`], quiet),
+      blob(root, `${rev}^:${leftPath}`),
+      blob(root, `${rev}:${file}`),
+      diffParent
+    ])
     const parent = parentR.code === 0 ? parentR.stdout.trim() : EMPTY_TREE
-    left = parent === EMPTY_TREE ? null : await blob(root, `${parent}:${leftPath}`)
-    right = await blob(root, `${mode.rev}:${file}`)
+    left = parent === EMPTY_TREE ? null : l
+    right = r
+    patch = diffParent.then(async (d) =>
+      parent !== EMPTY_TREE ? d.stdout : (await git(root, ['diff', '-U0', '--no-ext-diff', '-M', EMPTY_TREE, rev, ...paths], quiet)).stdout
+    )
     leftTitle = parent === EMPTY_TREE ? '(none)' : parent.slice(0, 8)
-    rightTitle = mode.rev.slice(0, 8)
-    diffArgs = ['diff', '-U0', '--no-ext-diff', '-M', parent, mode.rev, '--', ...(origPath ? [origPath] : []), file]
+    rightTitle = rev.slice(0, 8)
   }
 
   const base = { path: file, leftTitle, rightTitle, hunks: [] as Hunk[] }
@@ -252,13 +277,12 @@ export async function diff(root: string, file: string, origPath: string | undefi
   if (isBinary(l) || isBinary(r)) return { ...base, binary: true, tooLarge: false, left: '', right: '', canRevert: false }
 
   let hunks: Hunk[]
-  const tracked = (await git(root, ['ls-files', '--error-unmatch', '--', file], { allowFail: true, readOnly: true })).code === 0
-  if (mode.kind === 'local' && !tracked && left === null) {
+  if (untracked) {
     // Untracked: git diff does not see it; it is one inserted block.
     const n = countLines(normalize(r))
     hunks = n ? [{ oldStart: 0, oldLines: 0, newStart: 1, newLines: n, header: `@@ -0,0 +1,${n} @@` }] : []
   } else {
-    hunks = parseHunks((await git(root, diffArgs, { allowFail: true, readOnly: true })).stdout)
+    hunks = parseHunks(await patch)
   }
   return { ...base, binary: false, tooLarge: false, left: normalize(l), right: normalize(r), hunks, canRevert }
 }
@@ -338,13 +362,17 @@ export async function commit(
   if (op?.kind === 'merge') {
     // Git refuses a partial commit while merging: the merge commit takes everything staged.
     if (amend) throw new GitError(['commit'], 'You cannot amend while a merge is in progress.')
-    await git(root, ['commit', '-F', '-'], { input: message })
-    return (await read(root, ['rev-parse', '--short', 'HEAD'])).trim()
+    return committedHash(root, await git(root, ['commit', '-F', '-'], { input: message }))
   }
   // --only commits exactly the selected paths, whatever else is staged (the IDE semantics).
   const args = ['commit', '-F', '-', '--only', ...(amend ? ['--amend'] : []), '--', ...paths]
-  await git(root, args, { input: message })
-  return (await read(root, ['rev-parse', '--short', 'HEAD'])).trim()
+  return committedHash(root, await git(root, args, { input: message }))
+}
+
+/** The new commit's short hash from git's "[main 1a2b3c4] Subject" line (LC_ALL=C), or asked for. */
+async function committedHash(root: string, r: RunResult): Promise<string> {
+  const m = /^\[[^\]]*?([0-9a-f]{7,40})\]/m.exec(r.stdout)
+  return m ? m[1] : (await read(root, ['rev-parse', '--short', 'HEAD'])).trim()
 }
 
 export async function push(root: string): Promise<void> {
@@ -419,11 +447,18 @@ async function stashRef(root: string, hash: string): Promise<string> {
 }
 
 export async function shelfFiles(root: string, hash: string): Promise<(ChangedFile & { rev: string })[]> {
-  const tracked = (await commitFiles(root, hash)).map((f) => ({ ...f, rev: hash }))
-  const u = await git(root, ['rev-parse', '-q', '--verify', `${hash}^3`], { allowFail: true, readOnly: true })
-  if (u.code !== 0) return tracked
+  // The stash's own changes and its untracked-files commit (^3, when there is one: a root commit,
+  // so it is compared with the empty tree) all at once.
+  const quiet = { allowFail: true, readOnly: true }
+  const [trackedFiles, u, uFiles] = await Promise.all([
+    commitFiles(root, hash),
+    git(root, ['rev-parse', '-q', '--verify', `${hash}^3`], quiet),
+    git(root, ['diff', '--name-status', '-M', '-z', '--no-ext-diff', EMPTY_TREE, `${hash}^3`, '--'], quiet)
+  ])
+  const tracked = trackedFiles.map((f) => ({ ...f, rev: hash }))
+  if (u.code !== 0 || uFiles.code !== 0) return tracked
   const untrackedRev = u.stdout.trim()
-  const untracked = (await commitFiles(root, untrackedRev)).map((f) => ({ ...f, status: 'added' as const, rev: untrackedRev }))
+  const untracked = parseNameStatus(uFiles.stdout).map((f) => ({ ...f, status: 'added' as const, rev: untrackedRev }))
   return [...tracked, ...untracked].sort((a, b) => a.path.localeCompare(b.path))
 }
 
@@ -451,9 +486,14 @@ export async function updateProject(root: string): Promise<string> {
 
 export async function commitFiles(root: string, rev: string): Promise<ChangedFile[]> {
   // Against the first parent, so merges (and stashes, which are merges) list their changes too.
-  const parentR = await git(root, ['rev-parse', '-q', '--verify', `${rev}^`], { allowFail: true, readOnly: true })
-  const parent = parentR.code === 0 ? parentR.stdout.trim() : EMPTY_TREE
-  const out = await read(root, ['diff', '--name-status', '-M', '-z', '--no-ext-diff', parent, rev, '--'])
+  // Asked straight away; only a root commit (no parent) needs a second command, against the empty tree.
+  const args = (from: string) => ['diff', '--name-status', '-M', '-z', '--no-ext-diff', from, rev, '--']
+  const first = await git(root, args(`${rev}^`), { allowFail: true, readOnly: true })
+  return parseNameStatus(first.code === 0 ? first.stdout : await read(root, args(EMPTY_TREE)))
+}
+
+/** Parses `git diff --name-status -M -z`. */
+function parseNameStatus(out: string): ChangedFile[] {
   const parts = out.split('\0')
   const files: ChangedFile[] = []
   for (let i = 0; i < parts.length; i++) {
@@ -710,10 +750,30 @@ export async function branchOp(root: string, op: BranchOp): Promise<BranchOpResu
 }
 
 /** True when the file's changes are all staged (Orca's diff tab then needs --staged to show them). */
-export async function onlyStaged(root: string, file: string): Promise<boolean> {
-  const out = await read(root, ['status', '--porcelain=v2', '-z', '--untracked-files=all', '--', file])
-  const line = out.split('\0')[0] ?? ''
-  if (line[0] !== '1' && line[0] !== '2') return false
-  const [x, y] = line.split(' ')[1]
-  return x !== '.' && y === '.'
+export async function onlyStaged(root: string, file: string, status?: string): Promise<boolean> {
+  // A recent `status --porcelain=v2 -z` (the watcher's last snapshot) already knows; git is asked
+  // only when the file is not in it.
+  const known = status === undefined ? undefined : stagedIn(status, file)
+  if (known !== undefined) return known
+  return stagedIn(await read(root, ['status', '--porcelain=v2', '-z', '--untracked-files=all', '--', file]), file) ?? false
+}
+
+/** Whether `file` has staged changes only, from `status --porcelain=v2 -z` output; undefined when absent. */
+function stagedIn(status: string, file: string): boolean | undefined {
+  const parts = status.split('\0')
+  for (let i = 0; i < parts.length; i++) {
+    const line = parts[i]
+    const kind = line[0]
+    // Untracked and conflicted files have nothing staged on their own.
+    if (kind === '?' && line.slice(2) === file) return false
+    if (kind === 'u' && line.split(' ').slice(10).join(' ') === file) return false
+    if (kind !== '1' && kind !== '2') continue
+    const fields = line.split(' ')
+    const p = fields.slice(kind === '2' ? 9 : 8).join(' ')
+    if (kind === '2') i++ // the original path follows a rename
+    if (p !== file) continue
+    const [x, y] = fields[1]
+    return x !== '.' && y === '.'
+  }
+  return undefined
 }

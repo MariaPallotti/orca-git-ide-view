@@ -205,27 +205,40 @@ export default function activate(orca: OrcaWorkerApi): void {
     root: string
     at: number
     snapshot?: Promise<g.Snapshot>
-    operation?: Promise<Awaited<ReturnType<typeof g.operation>>>
     branches?: Promise<Awaited<ReturnType<typeof g.branches>>>
-    /** The Log of HEAD, 400 commits: what the panel shows first in a repository. */
+    /** The Log as the panel last asked for it (`logKey`); HEAD, 400 commits in a new repository. */
     log?: Promise<Awaited<ReturnType<typeof g.log>>>
+    logKey?: string
   }
   let prefetched: Prefetched | null = null
+  type LogInput = { limit?: number; all?: boolean; ref?: string }
+  const logKey = ({ limit, all, ref }: LogInput) => `${limit ?? ''}|${all ?? true}|${ref ?? ''}`
+  /** What the panel's Log showed last, per repository, so a change reads that one ahead. */
+  const lastLog = new Map<string, LogInput>()
 
-  function prefetch(): void {
+  /**
+   * Starts reading what the panel asks for on a reload. `known`: a snapshot just taken (after a
+   * change), used as is. `refs`: commits or branches may have changed, so the Log and branches too.
+   */
+  function prefetch(known?: g.Snapshot, refs = true): void {
     const root = focus?.repo?.root
     if (!root) {
       prefetched = null
       return
     }
     const quiet = <T>(p: Promise<T>) => (p.catch(() => {}), p)
+    const logInput = lastLog.get(root) ?? { limit: 400, ref: 'HEAD' }
     const entry: Prefetched = {
       root,
       at: Date.now(),
-      snapshot: quiet(g.snapshot(root)),
-      operation: quiet(g.operation(root)),
-      branches: quiet(g.branches(root)),
-      log: quiet(g.log(root, 400, true, 'HEAD'))
+      snapshot: known ? Promise.resolve(known) : quiet(g.snapshot(root)),
+      ...(refs
+        ? {
+            branches: quiet(g.branches(root)),
+            log: quiet(g.log(root, logInput.limit, logInput.all ?? true, logInput.ref)),
+            logKey: logKey(logInput)
+          }
+        : {})
     }
     prefetched = entry
     // The watcher compares against this snapshot, so it does not report the switch a second time.
@@ -241,7 +254,7 @@ export default function activate(orca: OrcaWorkerApi): void {
   }
 
   /** The prefetched answer for `root`, once; undefined when there is none or it is too old. */
-  function take<K extends 'snapshot' | 'operation' | 'branches' | 'log'>(key: K, root: string): Prefetched[K] | undefined {
+  function take<K extends 'snapshot' | 'branches' | 'log'>(key: K, root: string): Prefetched[K] | undefined {
     const p = prefetched
     if (!p || p.root !== root || Date.now() - p.at > PREFETCH_TTL_MS) return undefined
     const v = p[key]
@@ -296,8 +309,10 @@ export default function activate(orca: OrcaWorkerApi): void {
       if (!refs && fp.files === lastFiles) return
       lastFiles = fp.files
       lastRefs = fp.refs
-      prefetched = null // the repository moved on: answers read before are out of date
       if (focus?.repo?.root === root) focus.repo.branch = snap.branch
+      // Answers read before are out of date. The panel reloads on the message below: what it
+      // will ask for starts now, with this snapshot, so the reload does not wait for git again.
+      prefetch(snap, refs)
       orca.panels.post('git.changed', { reason, refs })
     } catch (e) {
       log(`fingerprint failed: ${(e as Error).message}`)
@@ -430,7 +445,9 @@ export default function activate(orca: OrcaWorkerApi): void {
       const f = await ensureFocus()
       if (!f.repo) return { ok: true, value: { repo: null, reason: f.reason, files: [] } }
       const root = f.repo.root
-      const [snap, operation] = await Promise.all([take('snapshot', root) ?? g.snapshot(root), take('operation', root) ?? g.operation(root)])
+      // The operation in progress is not part of the snapshot's fingerprint, so it is never
+      // prefetched: read now (a few file checks in .git, no git command).
+      const [snap, operation] = await Promise.all([take('snapshot', root) ?? g.snapshot(root), g.operation(root)])
       f.repo.branch = snap.branch
       lastFiles = snap.fingerprint.files
       lastRefs = snap.fingerprint.refs
@@ -458,7 +475,9 @@ export default function activate(orca: OrcaWorkerApi): void {
   /** Opens Orca's own diff of a changed file in a tab of the main area (full width, like an IDE's diff window). */
   orca.panels.handle('git.openDiffTab', ({ path: p }) =>
     wrap(async (root) => {
-      const staged = await g.onlyStaged(root, p)
+      // Orca's CLI already takes a second or more to start: no git command before it if the
+      // watcher's last status knows the file.
+      const staged = await g.onlyStaged(root, p, watchedRoot === root && lastFiles ? lastFiles : undefined)
       await runCli(['file', 'diff', path.join(root, p), '--worktree', `path:${root}`, '--focus', '--json', ...(staged ? ['--staged'] : [])])
       return null
     })
@@ -503,8 +522,12 @@ export default function activate(orca: OrcaWorkerApi): void {
   )
 
   orca.panels.handle('git.lastMessage', () => wrap((root) => g.lastMessage(root)))
-  orca.panels.handle('git.log', ({ limit, all, ref }) =>
-    wrap((root) => (limit === 400 && ref === 'HEAD' ? take('log', root) : undefined) ?? g.log(root, limit, all ?? true, ref))
+  orca.panels.handle('git.log', (input) =>
+    wrap((root) => {
+      lastLog.set(root, input ?? {})
+      const ready = prefetched?.logKey === logKey(input ?? {}) ? take('log', root) : undefined
+      return ready ?? g.log(root, input?.limit, input?.all ?? true, input?.ref)
+    })
   )
   orca.panels.handle('git.branches', () => wrap((root) => take('branches', root) ?? g.branches(root)))
   orca.panels.handle('git.branchOp', (op) =>
